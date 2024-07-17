@@ -1,0 +1,51 @@
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+
+
+def calculate_L_analytic(row):
+    phi = row['phi']
+    del1 = row['delta1']
+    del2 = row['delta2']
+    vin = row['vin']
+    vo = row['vo']
+    d_value = row['phi']/np.pi
+    P2 = row['Pdc_out']
+    list = [(del1+del2), (np.pi-(del1+del2))]
+    lbase = 1.4*vin*vo/(2*np.pi*P2*100000)
+    if (phi >= (del1+del2) and (del1+del2) <= np.pi/2):
+        return (lbase*(phi*(1-d_value) - ((del1**2+del2**2)/np.pi)))
+    elif phi <= np.pi/2 and phi >= np.pi-(del1+del2):
+        return ((lbase*2/np.pi)*(np.pi/2 - del1)*(np.pi/2 - del2))
+    elif (np.abs(del1-del2) <= phi) and phi < np.min(list):
+        return (lbase*((phi*(1-d_value/2))-(d_value*(del1+del2))-((del1-del2)**2/(2*np.pi))))
+    elif phi < np.abs(del1-del2) and del2 > del1:
+        return (lbase*phi*(1-(2*del2/np.pi)))
+    elif phi < np.abs(del1-del2) and del1 > del2:
+        return (lbase*phi*(1-(2*del1/np.pi)))
+
+
+file1 = 'D:/python_result_suri/DAB_dataset_new.csv'
+
+# Read the CSV file into a DataFrame
+df = pd.read_csv(file1)
+
+# List of new column names
+new_column_names = ['phi', 'delta1', 'delta2',
+                    'Ron1', 'Ron2', 'Ll1', 'Ll2', 'Pdc_in', 'Pdc_out', 'Pdc_in_minus_Pdc_out', 'P_loss_total', 'I1_RMS', 'I2_RMS']
+
+# # Assign new column names to the DataFrame
+df.columns = new_column_names
+df["vin"] = 160
+df["vo"] = 120
+df = df[df['Pdc_out'] > 0]
+df['L'] = df['Ll1']+df['Ll2']*1.4*1.4
+df['L_analytic'] = df.apply(calculate_L_analytic, axis=1)
+df['L_analytic'] = df['L_analytic']*1000000
+df = df.dropna(subset=['L_analytic'])
+# # Display the first few rows of the DataFrame to verify the changes
+print(df.head())
+
+output_file = 'D:/python_result_suri/DAB_dataset_new_updated.csv'
+df.to_csv(output_file, index=False)

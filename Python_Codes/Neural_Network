@@ -1,0 +1,167 @@
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, TensorBoard, ModelCheckpoint
+from tensorflow.keras.initializers import HeNormal, GlorotNormal, RandomNormal
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import datetime
+
+file1 = 'D:/python_result_suri/DAB_dataset_new_updated.csv'
+
+# Read the CSV file into a DataFrame
+df = pd.read_csv(file1)
+
+# mode 1 only
+# df = df[(df['phi'] >= (df['delta1'] + df['delta2']))
+#         & ((df['delta1'] + df['delta2']) <= np.pi/2)]
+
+
+df["cosd1"] = np.cos(df['delta1'])
+df["cosd2"] = np.cos(df['delta2'])
+df["sinp"] = np.sin(df['phi'])
+df["I2_RMS"] = df["I2_RMS"]*5/7
+df["vo"] = df["vo"]*7/5
+df["Ll2"] = df["Ll2"]*((7/5)**2)
+df["Ron2"] = df["Ron2"]*((7/5)**2)
+X = df[['phi', 'vin', 'vo', 'I1_RMS', 'I2_RMS',
+        'delta1', 'delta2', 'cosd1', 'cosd2', 'sinp', 'P_loss_total', "L_analytic"]]
+y = df[['Ll1', 'Ll2', 'Ron1', 'Ron2']]
+# y = df[['Ron2']]
+
+# Split the data into training, validation, and testing sets
+X_train, X_temp, y_train, y_temp = train_test_split(
+    X, y, test_size=0.3, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(
+    X_temp, y_temp, test_size=0.5, random_state=42)
+
+# Standardize the data
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+
+# Efficient data pipeline
+train_dataset = tf.data.Dataset.from_tensor_slices((X_train_scaled, y_train)).shuffle(
+    buffer_size=1024).batch(32).prefetch(tf.data.experimental.AUTOTUNE)
+val_dataset = tf.data.Dataset.from_tensor_slices(
+    (X_val_scaled, y_val)).batch(32).prefetch(tf.data.experimental.AUTOTUNE)
+test_dataset = tf.data.Dataset.from_tensor_slices(
+    (X_test_scaled, y_test)).batch(32).prefetch(tf.data.experimental.AUTOTUNE)
+
+
+def custom_loss(y_true, y_pred):
+    mse_loss = tf.reduce_mean(tf.square(y_true - y_pred))
+    return mse_loss
+
+
+# Create a log directory for TensorBoard
+log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+tensorboard_callback = TensorBoard(log_dir=log_dir)
+
+
+def build_and_train_nn(train_dataset, val_dataset, layers, nodes, activation='relu', dropout_rate=0.0, learning_rate=0.001, epochs=100, batch_size=32, kernel_initializer='he_normal'):
+    model = Sequential()
+    model.add(Input(shape=(X_train.shape[1],)))
+    model.add(Dropout(dropout_rate))
+    for _ in range(layers - 1):
+        model.add(Dense(nodes, activation=activation,
+                  kernel_initializer=kernel_initializer))
+        model.add(Dropout(dropout_rate))
+    # Adjust the output layer to match y shape
+    model.add(Dense(4, activation='linear',
+              kernel_initializer=kernel_initializer))
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer, loss=custom_loss, metrics=['mse'])
+
+    early_stopping = EarlyStopping(
+        monitor='val_loss', patience=10, restore_best_weights=True)
+
+    history = model.fit(train_dataset, validation_data=val_dataset, epochs=epochs, batch_size=batch_size, verbose=1,
+                        callbacks=[early_stopping, tensorboard_callback])
+    return model, history
+
+
+layer_options = [4]
+node_options = [32]
+activation_options = ['sigmoid']
+learning_rate_options = [0.01]
+epochs = 100
+batch_size_options = [32]
+dropout_rate = 0.0
+initializer_options = [GlorotNormal()]
+
+best_loss = float('inf')
+best_params = {}
+best_model = None
+
+for layers in layer_options:
+    for nodes in node_options:
+        for activation in activation_options:
+            for learning_rate in learning_rate_options:
+                for batch_size in batch_size_options:
+                    for initializer in initializer_options:
+                        print(
+                            f"Training model with {layers} layers, {nodes} nodes, {activation} activation, lr={learning_rate}, batch size={batch_size}, initializer={initializer}")
+                        model, history = build_and_train_nn(train_dataset, val_dataset, layers=layers, nodes=nodes, activation=activation,
+                                                            learning_rate=learning_rate, epochs=epochs, batch_size=batch_size, dropout_rate=dropout_rate,
+                                                            kernel_initializer=initializer)
+                        mse, mae = model.evaluate(val_dataset, verbose=0)
+                        print(
+                            f'Validation Loss (MSE): {mse}, Validation MAE: {mae}')
+                        if mse < best_loss:
+                            best_loss = mse
+                            best_params = {
+                                'layers': layers,
+                                'nodes': nodes,
+                                'activation': activation,
+                                'learning_rate': learning_rate,
+                                'batch_size': batch_size,
+                                'dropout_rate': dropout_rate,
+                                'initializer': initializer.__class__.__name__
+                            }
+                            best_model = model
+
+print(f"Best model parameters: {best_params}")
+print(f"Best validation loss: {best_loss}")
+
+plt.figure(figsize=(10, 6))
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss')
+plt.legend()
+plt.show()
+
+y_pred = best_model.predict(X_test_scaled)
+mse = mean_squared_error(y_test, y_pred)
+mae = mean_absolute_error(y_test, y_pred)
+print(f'Best Model - Mean Squared Error: {mse}')
+print(f'Best Model - Mean Absolute Error: {mae}')
+
+# Calculate average error percentage for each output
+avg_error_percentage = []
+for i in range(y_test.shape[1]):
+    mae_output = mean_absolute_error(y_test.iloc[:, i], y_pred[:, i])
+    avg_error_percentage.append((mae_output / y_test.iloc[:, i].mean()) * 100)
+
+for i, avg_err in enumerate(avg_error_percentage):
+    print(f'Average Error Percentage for Output {i+1}: {avg_err:.2f}%')
+
+# Plotting y_pred vs actual for each output separately
+for i in range(y_test.shape[1]):
+    plt.figure(figsize=(8, 6))
+    plt.scatter(y_test.iloc[:, i], y_pred[:, i], alpha=0.5)
+    plt.plot([y_test.iloc[:, i].min(), y_test.iloc[:, i].max()], [
+             y_test.iloc[:, i].min(), y_test.iloc[:, i].max()], 'r--', lw=2)
+    plt.xlabel(f'Actual Output {i+1}')
+    plt.ylabel(f'Predicted Output {i+1}')
+    plt.title(f'Predicted vs Actual Output {i+1}')
+    plt.show()

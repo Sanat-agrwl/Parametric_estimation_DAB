@@ -1,0 +1,308 @@
+
+
+# # ************************************************************************************************************************************************************
+# # ************************************************************************************************************************************************************
+# # ************************************************************************************************************************************************************
+# # ************************************************************************************************************************************************************
+# # ************************************************************************************************************************************************************
+
+
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, TensorBoard
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import matplotlib.pyplot as plt
+import datetime
+
+# Verify TensorFlow is using GPU
+# Load the CSV files
+file = 'D:/python_result_suri/DAB_dataset_only_L_Pred.csv'
+
+df = pd.read_csv(file)
+
+df['vin'] = 160
+df['vo'] = 120
+df['P1'] = df['vin'] * df['Iin_avg']
+df['P2'] = df['vo'] * df['Iout_avg']
+df['phi'] = df['d_value'] * np.pi
+df = df[df['P2'] > 0]
+
+unique_L_values = df['L_value'].unique()
+
+# Randomly select 10 different values of L
+selected_L_values = np.random.choice(unique_L_values, 10, replace=False)
+
+# Filter the DataFrame to include only the rows corresponding to these 10 values of L
+df = df[df['L_value'].isin(selected_L_values)]
+
+
+def calculate_L_analytic(row):
+    phi = row['phi']
+    del1 = row['del1']
+    del2 = row['del2']
+    vin = row['vin']
+    vo = row['vo']
+    d_value = row['d_value']
+    P2 = row['P2']
+    list = [(del1+del2), (np.pi-(del1+del2))]
+    lbase = 1.4*vin*vo/(2*np.pi*P2*100000)
+
+    if (phi >= (del1+del2) and (del1+del2) <= np.pi/2):
+        return (lbase*(phi*(1-d_value) - ((del1**2+del2**2)/np.pi)))
+    elif phi <= np.pi/2 and phi >= np.pi-(del1+del2):
+        return ((lbase*2/np.pi)*(np.pi/2 - del1)*(np.pi/2 - del2))
+    elif (np.abs(del1-del2) <= phi) and phi < np.min(list):
+        return (lbase*((phi*(1-d_value/2))-(d_value*(del1+del2))-((del1-del2)**2/(2*np.pi))))
+    elif phi < np.abs(del1-del2) and del2 > del1:
+        return (lbase*phi*(1-(2*del2/np.pi)))
+    elif phi < np.abs(del1-del2) and del1 > del2:
+        return (lbase*phi*(1-(2*del1/np.pi)))
+
+
+df['L_analytic'] = df.apply(calculate_L_analytic, axis=1)
+df['L_analytic'] = df['L_analytic'] * 1000000
+df['L_value'] = df['L_value'] * 1000000
+df['loss'] = df['P1'] - df['P2']
+
+# Select relevant columns
+df = df[['d_value', 'phi', 'vin', 'vo', 'Iin_avg', 'Iout_avg', 'P1', 'P2',
+         'ip_RMS', 'is_RMS', 'L_value', 'del1', 'del2', 'L_analytic', 'loss']]
+
+# Prepare features and target variable
+X = df[['phi', 'vin', 'vo', 'Iin_avg', 'Iout_avg',
+        'loss', 'L_analytic', 'del1', 'del2']]
+y = df['L_value']
+
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+
+# Standardize the data
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+phi_test = df.loc[y_test.index, 'phi'].values
+phi_value_tensor = tf.constant(phi_test, dtype=tf.float32)
+Vin_test = df.loc[y_test.index, 'vin'].values
+Vin_test_tensor = tf.constant(Vin_test, dtype=tf.float32)
+Vo_test = df.loc[y_test.index, 'vo'].values
+Vo_test_tensor = tf.constant(Vo_test, dtype=tf.float32)
+del1_test = df.loc[y_test.index, 'del1'].values
+del1_test_tensor = tf.constant(del1_test, dtype=tf.float32)
+del2_test = df.loc[y_test.index, 'del2'].values
+del2_test_tensor = tf.constant(del2_test, dtype=tf.float32)
+
+# Efficient data pipeline
+train_dataset = tf.data.Dataset.from_tensor_slices((X_train_scaled, y_train))
+train_dataset = train_dataset.shuffle(buffer_size=1024).batch(
+    32).prefetch(tf.data.experimental.AUTOTUNE)
+
+test_dataset = tf.data.Dataset.from_tensor_slices((X_test_scaled, y_test))
+test_dataset = test_dataset.batch(32).prefetch(tf.data.experimental.AUTOTUNE)
+
+# Define a simplified custom loss function for debugging
+
+
+def calculate_power(L, V1, V2, delta1, delta2, phi):
+    # Define constants
+    Ron1 = 13.5e-3
+    n1 = 7
+    n2 = 5
+    ratio = (n1 / n2)**2
+    Ron2 = ratio * 5e-3
+    Rl1 = 10e-3
+    Rl2 = ratio * 7e-3
+    fsw = 1e5
+    V2 = V2 * (n1 / n2)
+    L2_base = ((n1 / n2)**2) * 3.5e-6
+    L1_base = 6.2e-6
+    L_base = L1_base + L2_base
+    deviation = (L - L_base) / L_base
+    L1 = L1_base * (1 + deviation)
+    L2 = L2_base * (1 + deviation)
+    Lm = 300e-6
+    Rm = 1.0805e+04
+    w = 2 * np.pi * fsw
+
+    # Define tensors
+    k_vals = tf.range(1, 52, 2, dtype=tf.float32)
+    sum_i1_RMS_squared = tf.constant(0.0, dtype=tf.float32)
+    sum_i2_RMS_squared = tf.constant(0.0, dtype=tf.float32)
+    sum_Pac_1 = tf.constant(0.0, dtype=tf.float32)
+    sum_Pac_2 = tf.constant(0.0, dtype=tf.float32)
+
+    for k_idx in range(26):
+        k = k_vals[k_idx]
+        Z1 = 2 * Ron1 + Rl1 + tf.complex(0.0, 2 * np.pi * fsw * k * L1)
+        Z2 = 2 * Ron2 + Rl2 + tf.complex(0.0,  2 * np.pi * fsw * k * L2)
+        Z3 = tf.complex(0.0, Rm * 2 * np.pi * fsw * k * Lm) / (
+            Rm + tf.complex(0.0, 2 * np.pi * fsw * k * Lm))
+
+        Ztot = Z1 * Z2 + Z1 * Z3 + Z2 * Z3
+        Z12 = Ztot / Z3
+        Z23 = Ztot / Z1
+        Z13 = Ztot / Z2
+
+        v1_abs = 4 * V1 * tf.cos(k * delta1) / (k * np.pi)
+        v2_abs = 4 * V2 * tf.cos(k * delta2) / (k * np.pi)
+
+        Ai1 = (v1_abs / tf.abs(Z12)) * tf.cos(tf.math.angle(Z12)) - \
+              (v2_abs / tf.abs(Z12)) * tf.cos(k * phi + tf.math.angle(Z12)) + \
+              (v1_abs / tf.abs(Z13)) * tf.cos(tf.math.angle(Z13))
+
+        Bi1 = -(v1_abs / tf.abs(Z12)) * tf.sin(tf.math.angle(Z12)) + \
+            (v2_abs / tf.abs(Z12)) * tf.sin(k * phi + tf.math.angle(Z12)) - \
+            (v1_abs / tf.abs(Z13)) * tf.sin(tf.math.angle(Z13))
+
+        Ai2 = -(v1_abs / tf.abs(Z12)) * tf.cos(tf.math.angle(Z12)) + \
+            (v2_abs / tf.abs(Z12)) * tf.cos(k * phi + tf.math.angle(Z12)) + \
+            (v2_abs / tf.abs(Z23)) * tf.cos(k * phi + tf.math.angle(Z23))
+
+        Bi2 = (v1_abs / tf.abs(Z12)) * tf.sin(tf.math.angle(Z12)) - \
+              (v2_abs / tf.abs(Z12)) * tf.sin(k * phi + tf.math.angle(Z12)) - \
+              (v2_abs / tf.abs(Z23)) * tf.sin(k * phi + tf.math.angle(Z23))
+
+        sum_i1_RMS_squared += Ai1 ** 2 + Bi1 ** 2
+        sum_i2_RMS_squared += Ai2 ** 2 + Bi2 ** 2
+
+        angle_i1 = tf.atan2(Bi1, Ai1)
+        angle_i2 = k * phi + tf.atan2(Bi2, Ai2)
+
+        sum_Pac_1 += (v1_abs / tf.sqrt(2.0)) * \
+            tf.sqrt((Ai1 ** 2 + Bi1 ** 2) / 2.0) * tf.cos(angle_i1)
+        sum_Pac_2 += (v2_abs / tf.sqrt(2.0)) * \
+            tf.sqrt((Ai2 ** 2 + Bi2 ** 2) / 2.0) * tf.cos(angle_i2)
+
+    I1_RMS = tf.sqrt(sum_i1_RMS_squared / 2.0)
+    I2_RMS = tf.sqrt(sum_i2_RMS_squared / 2.0)
+    Pac_1 = sum_Pac_1
+    Pac_2 = sum_Pac_2
+
+    P_lossless = V1 * V2 * phi * (1.0 - phi / np.pi) / (2.0 * np.pi * fsw * L)
+    P_Cond = I1_RMS**2 * (2.0 * Ron1 + Rl1) + I2_RMS**2 * (2.0 * Ron2 + Rl2)
+
+    results = {
+        "I1_RMS": I1_RMS,
+        "I2_RMS": I2_RMS,
+        "P_lossless": P_lossless,
+        "Pac_1": Pac_1,
+        "Pac_2": Pac_2,
+        "Pac_diff": Pac_1 + Pac_2,
+        "P_cond_loss": P_Cond
+    }
+
+    return tf.abs(results["Pac_2"])
+
+
+def custom_loss(y_true, y_pred):
+    # Define a function to calculate power using tf.map_fn
+    def power_function(y_pred):
+        return calculate_power(y_pred, Vin_test_tensor, Vo_test_tensor, del1_test_tensor, del2_test_tensor, phi_value_tensor)
+
+    print("START_LOSS")
+    powered_pred = tf.map_fn(power_function, y_pred)
+    powered_actual = tf.map_fn(power_function, y_true)
+
+    mse_loss = tf.reduce_mean(tf.square(y_true - y_pred))
+    p_loss = tf.reduce_mean(tf.square(powered_pred - powered_actual))
+
+    print("YOYYOYO")
+
+    return mse_loss+p_loss
+
+
+# Create a log directory for TensorBoard
+log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+tensorboard_callback = TensorBoard(
+    log_dir=log_dir)
+
+
+def build_and_train_nn(train_dataset, test_dataset, layers, nodes, activation='relu', dropout_rate=0.0, learning_rate=0.001, epochs=100, batch_size=32):
+    model = Sequential()
+    model.add(Input(shape=(X_train.shape[1],)))
+    model.add(Dropout(dropout_rate))
+    for _ in range(layers - 1):
+        model.add(Dense(nodes, activation=activation,
+                  kernel_initializer='he_normal'))
+        model.add(Dropout(dropout_rate))
+    model.add(Dense(1, activation='linear', kernel_initializer='he_normal'))
+    optimizer = Adam(learning_rate=learning_rate)
+    model.compile(optimizer=optimizer,
+                  loss=custom_loss, metrics=['mse'])
+    early_stopping = EarlyStopping(
+        monitor='val_loss', patience=10, restore_best_weights=True)
+    history = model.fit(train_dataset, validation_data=test_dataset, epochs=epochs,
+                        batch_size=batch_size, verbose=1, callbacks=[early_stopping, tensorboard_callback])
+    return model, history
+
+
+layer_options = [3]
+node_options = [8, 16, 32, 48]
+activation_options = ['sigmoid']
+learning_rate_options = [0.01]
+epochs = 100
+batch_size_options = [32]
+dropout_rate = 0.0
+
+best_loss = float('inf')
+best_params = {}
+best_model = None
+
+for layers in layer_options:
+    for nodes in node_options:
+        for activation in activation_options:
+            for learning_rate in learning_rate_options:
+                for batch_size in batch_size_options:
+                    print(
+                        f"Training model with {layers} layers, {nodes} nodes, {activation} activation, lr={learning_rate}, batch size={batch_size}")
+                    model, history = build_and_train_nn(train_dataset, test_dataset, layers=layers, nodes=nodes, activation=activation,
+                                                        learning_rate=learning_rate, epochs=epochs, batch_size=batch_size, dropout_rate=dropout_rate)
+                    mse, mae = model.evaluate(test_dataset, verbose=0)
+                    print(
+                        f'Validation Loss (MSE): {mse}, Validation MAE: {mae}')
+                    if mse < best_loss:
+                        best_loss = mse
+                        best_params = {
+                            'layers': layers,
+                            'nodes': nodes,
+                            'activation': activation,
+                            'learning_rate': learning_rate,
+                            'batch_size': batch_size,
+                            'dropout_rate': dropout_rate
+                        }
+                        best_model = model
+
+print(f"Best model parameters: {best_params}")
+print(f"Best validation loss: {best_loss}")
+
+plt.figure(figsize=(10, 6))
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss')
+plt.legend()
+plt.show()
+
+y_pred = best_model.predict(X_test_scaled)
+mse = mean_squared_error(y_test, y_pred)
+mae = mean_absolute_error(y_test, y_pred)
+print(f'Best Model - Mean Squared Error: {mse}')
+print(f'Best Model - Mean Absolute Error: {mae}')
+
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, y_pred, color='blue',
+            alpha=0.5, label='Predicted vs Actual')
+plt.plot([y.min(), y.max()], [y.min(), y.max()],
+         'r--', lw=2, label='Perfect Fit')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.title('Predicted vs Actual Values')
+plt.legend()
+plt.show()

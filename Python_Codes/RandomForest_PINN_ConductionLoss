@@ -1,0 +1,334 @@
+
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import make_scorer
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import matplotlib.pyplot as plt
+
+# Load the CSV files
+file = 'D:/python_result_suri/DAB_dataset_only_L_Pred.csv'
+df = pd.read_csv(file)
+
+
+# Add new columns
+df['vin'] = 160
+df['vo'] = 120
+df['P1'] = df['vin'] * df['Iin_avg']
+df['P2'] = df['vo'] * df['Iout_avg']
+df['phi'] = df['d_value'] * np.pi
+
+
+# Define a function to calculate L_analytic based on the conditions
+df = df[df['P2'] > 0]
+
+
+def calculate_L_analytic(row):
+    phi = row['phi']
+    del1 = row['del1']
+    del2 = row['del2']
+    vin = row['vin']
+    vo = row['vo']
+    d_value = row['d_value']
+    P2 = row['P2']
+    list = [(del1+del2), (np.pi-(del1+del2))]
+    lbase = 1.4*vin*vo/(2*np.pi*P2*100000)
+
+    if (phi >= (del1+del2) and (del1+del2) <= np.pi/2):
+        return (lbase*(phi*(1-d_value) - ((del1**2+del2**2)/np.pi)))
+    elif phi <= np.pi/2 and phi >= np.pi-(del1+del2):
+        return ((lbase*2/np.pi)*(np.pi/2 - del1)*(np.pi/2 - del2))
+    elif (np.abs(del1-del2) <= phi) and phi < np.min(list):
+        return (lbase*((phi*(1-d_value/2))-(d_value*(del1+del2))-((del1-del2)**2/(2*np.pi))))
+    elif phi < np.abs(del1-del2) and del2 > del1:
+        return (lbase*phi*(1-(2*del2/np.pi)))
+    elif phi < np.abs(del1-del2) and del1 > del2:
+        return (lbase*phi*(1-(2*del1/np.pi)))
+
+
+# Apply the function to calculate L_analytic
+df['L_analytic'] = df.apply(calculate_L_analytic, axis=1)
+
+df['loss'] = df['P1'] - df['P2']
+df['L_analytic'] = df['L_analytic']*1000000
+df['L_value'] = df['L_value']*1000000
+
+# Select relevant columns
+df = df[['d_value', 'phi', 'vin', 'vo', 'Iin_avg', 'Iout_avg', 'P1',
+         'P2', 'ip_RMS', 'is_RMS', 'L_value', 'del1', 'del2', 'L_analytic', 'loss']]
+
+
+# Prepare features and target variable
+X = df[['phi', 'vin', 'vo', 'Iin_avg', 'Iout_avg',
+        'loss', 'L_analytic', 'del1', 'del2']]
+y = df['L_value']
+
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+
+# Scale features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+
+
+
+def calculate_power(L, V1, V2, delta1, delta2, phi):
+    # Define constants
+    Ron1 = 13.5e-3
+    n1 = 7
+    n2 = 5
+    ratio = (n1 / n2)**2
+    Ron2 = ratio * 5e-3
+    Rl1 = 10e-3
+    Rl2 = ratio * 7e-3
+    fsw = 1e5
+    # Example base value for L
+    V2 = V2*(n1/n2)
+    # Calculate L1_base and L2_base for the base value of L
+    L2_base = ((n1 / n2)**2) * 3.5e-6
+    L1_base = 6.2e-6
+    L_base = L1_base+L2_base
+    # Calculate deviations from the base value
+    deviation = (L - L_base)/L_base
+    # print(deviation)
+
+    L1 = L1_base*(1 + deviation)
+    L2 = L2_base*(1 + deviation)
+
+    # print(f"L1={L1} and L2={L2}")
+
+    Lm = 300e-6
+    Rm = 1.0805e+04
+    w = 2 * np.pi * fsw
+
+    # Time vector from 0 to 10 microseconds
+    t = np.linspace(0, 10e-6, 1000)
+
+    # Preallocate arrays
+    Z1 = np.zeros(26, dtype=complex)
+    Z2 = np.zeros(26, dtype=complex)
+    Z3 = np.zeros(26, dtype=complex)
+    Ztot = np.zeros(26, dtype=complex)
+    Z12 = np.zeros(26, dtype=complex)
+    Z23 = np.zeros(26, dtype=complex)
+    Z13 = np.zeros(26, dtype=complex)
+    v1_abs = np.zeros(26)
+    v2_abs = np.zeros(26)
+    Ai1 = np.zeros(26)
+    Bi1 = np.zeros(26)
+    Ai2 = np.zeros(26)
+    Bi2 = np.zeros(26)
+    i1_t = np.zeros((len(t), 26))
+    i2_t = np.zeros((len(t), 26))
+    v1_t = np.zeros((len(t), 26))
+
+    # Initialize sums
+    sum_i1_RMS_squared = 0
+    sum_i2_RMS_squared = 0
+    sum_Pac_1 = 0
+    sum_Pac_2 = 0
+    i1_abs = np.zeros(26)
+    angle_i1 = np.zeros(26)
+    angle_i2 = np.zeros(26)
+    cos_angle = np.zeros(26)
+
+    # Perform calculations
+    for k in range(1, 52, 2):
+        k_idx = ((k + 1) // 2)-1
+        Z1[k_idx] = 2 * Ron1 + Rl1 + 1j * (2 * np.pi * fsw * k * L1)
+        Z2[k_idx] = 2 * Ron2 + Rl2 + 1j * (2 * np.pi * fsw * k * L2)
+        Z3[k_idx] = Rm * 1j * (2 * np.pi * fsw * k * Lm) / \
+            (Rm + 1j * (2 * np.pi * fsw * k * Lm))
+
+        Ztot[k_idx] = Z1[k_idx] * Z2[k_idx] + \
+            Z1[k_idx] * Z3[k_idx] + Z2[k_idx] * Z3[k_idx]
+
+        Z12[k_idx] = Ztot[k_idx] / Z3[k_idx]
+        Z23[k_idx] = Ztot[k_idx] / Z1[k_idx]
+        Z13[k_idx] = Ztot[k_idx] / Z2[k_idx]
+
+        v1_abs[k_idx] = 4 * V1 * np.cos(k * delta1) / (k * np.pi)
+        v2_abs[k_idx] = 4 * V2 * np.cos(k * delta2) / (k * np.pi)
+
+        Ai1[k_idx] = (v1_abs[k_idx] / abs(Z12[k_idx])) * np.cos(np.angle(Z12[k_idx])) - \
+                     (v2_abs[k_idx] / abs(Z12[k_idx])) * np.cos(k * phi + np.angle(Z12[k_idx])) + \
+                     (v1_abs[k_idx] / abs(Z13[k_idx])) * \
+            np.cos(np.angle(Z13[k_idx]))
+
+        Bi1[k_idx] = -(v1_abs[k_idx] / abs(Z12[k_idx])) * np.sin(np.angle(Z12[k_idx])) + \
+            (v2_abs[k_idx] / abs(Z12[k_idx])) * np.sin(k * phi + np.angle(Z12[k_idx])) - \
+            (v1_abs[k_idx] / abs(Z13[k_idx])) * np.sin(np.angle(Z13[k_idx]))
+
+        Ai2[k_idx] = -(v1_abs[k_idx] / abs(Z12[k_idx])) * np.cos(np.angle(Z12[k_idx])) + \
+            (v2_abs[k_idx] / abs(Z12[k_idx])) * np.cos(k * phi + np.angle(Z12[k_idx])) + \
+            (v2_abs[k_idx] / abs(Z23[k_idx])) * \
+            np.cos(k * phi + np.angle(Z23[k_idx]))
+
+        Bi2[k_idx] = +(v1_abs[k_idx] / abs(Z12[k_idx])) * np.sin(np.angle(Z12[k_idx])) - \
+            (v2_abs[k_idx] / abs(Z12[k_idx])) * np.sin(k * phi + np.angle(Z12[k_idx])) - \
+            (v2_abs[k_idx] / abs(Z23[k_idx])) * \
+            np.sin(k * phi + np.angle(Z23[k_idx]))
+
+        i1_t[:, k_idx] = Ai1[k_idx] * \
+            np.sin(k * w * t) + Bi1[k_idx] * np.cos(k * w * t)
+        i2_t[:, k_idx] = Ai2[k_idx] * \
+            np.sin(k * w * t) + Bi2[k_idx] * np.cos(k * w * t)
+
+        v1_t[:, k_idx] = v1_abs[k_idx] * np.sin(k * w * t) * np.cos(k * delta1)
+
+        i1_abs[k_idx] = np.sqrt((Ai1[k_idx]**2 + Bi1[k_idx]**2))
+
+        angle_i1[k_idx] = np.arctan2(Bi1[k_idx], Ai1[k_idx])
+
+        angle_i2[k_idx] = k * phi + np.arctan2(Bi2[k_idx], Ai2[k_idx])
+
+        cos_angle[k_idx] = np.cos(angle_i1[k_idx])
+
+        sum_Pac_1 += (v1_abs[k_idx] / np.sqrt(2)) * np.sqrt((Ai1[k_idx]
+                                                             ** 2 + Bi1[k_idx]**2) / 2) * np.cos(angle_i1[k_idx])
+
+        sum_i1_RMS_squared += (Ai1[k_idx]**2 + Bi1[k_idx]**2)
+        sum_i2_RMS_squared += (Ai2[k_idx]**2 + Bi2[k_idx]**2)
+
+        sum_Pac_2 += (v2_abs[k_idx] / np.sqrt(2)) * (np.sqrt((Ai2[k_idx]
+                                                              ** 2 + Bi2[k_idx]**2) / 2)) * np.cos(angle_i2[k_idx])
+
+    I1_RMS = np.sqrt(sum_i1_RMS_squared / 2)
+    I2_RMS = np.sqrt(sum_i2_RMS_squared / 2)
+    Pac_1 = sum_Pac_1
+    Pac_2 = sum_Pac_2
+
+    # Sum all the harmonics to get the total current
+    i1_total_t = np.sum(i1_t, axis=1)
+    i2_total_t = np.sum(i2_t, axis=1)
+    v1_total_t = np.sum(v1_t, axis=1)
+
+    # Calculate and display an additional result
+    P_lossless = V1 * V2 * phi * (1 - phi / np.pi) / (2 * np.pi * fsw * L)
+
+    P_Cond = I1_RMS**2 * (2 * Ron1 + Rl1) + I2_RMS**2 * (2 * Ron2 + Rl2)
+
+    results = {
+        "I1_RMS": I1_RMS,
+        "I2_RMS": I2_RMS,
+        "P_lossless": P_lossless,
+        "Pac_1": Pac_1,
+        "Pac_2": Pac_2,
+        "Pac_diff": Pac_1 + Pac_2,
+        "P_cond_loss": P_Cond,
+        "t": t,
+        "i1_total_t": i1_total_t,
+        "i2_total_t": i2_total_t,
+        "v1_total_t": v1_total_t
+    }
+
+    return results["Pac_2"]
+
+# Create a custom loss function with normalization
+
+
+def custom_loss(y_true, y_pred):
+    mse_loss = mean_squared_error(y_true, y_pred)
+    p2a = np.array(df.loc[y_true.index, 'P2'])
+    vina = np.array(df.loc[y_true.index, 'vin'])
+    voa = np.array(df.loc[y_true.index, 'vo'])
+    del1a = np.array(df.loc[y_true.index, 'del1'])
+    del2a = np.array(df.loc[y_true.index, 'del2'])
+    phia = np.array(df.loc[y_true.index, 'phi'])
+    y_truea = np.array(y_true)
+    y_preda = np.array(y_pred)
+    result_actuals = []
+    result_predicteds = []
+    for i in range(len(y_truea)):
+        # result_actual = calculate_power(
+        #     y_truea[i], vina[i], voa[i], del1a[i], del2a[i], phia[i])
+        result_predicted = calculate_power(
+            y_preda[i]/1000000, vina[i], voa[i], del1a[i], del2a[i], phia[i])
+        result_actual = p2a[i]
+        result_actuals.append(result_actual)
+        result_predicteds.append(result_predicted)
+    p_loss = np.mean(np.abs(np.array(result_actuals) -
+                     np.array(result_predicteds)))
+    return mse_loss+100*p_loss
+
+
+# Convert the custom loss function to a scorer
+custom_scorer = make_scorer(custom_loss, greater_is_better=False)
+
+# Create and train Random Forest Regressor with GridSearchCV
+model = RandomForestRegressor(random_state=42)
+param_grid = {
+    'n_estimators': [700, 800, 900],
+    'max_depth': [30, 40, 50]
+}
+
+grid_search = GridSearchCV(
+    estimator=model, param_grid=param_grid, cv=5, scoring=custom_scorer)
+grid_search.fit(X_train_scaled, y_train)
+
+# Get the best model
+best_model = grid_search.best_estimator_
+# Print the best parameters
+print(f'Best Parameters: {grid_search.best_params_}')
+
+# Predict on the test set
+y_pred = best_model.predict(X_test_scaled)
+
+# Evaluate the model
+mse = mean_squared_error(y_test, y_pred)
+mae = mean_absolute_error(y_test, y_pred)
+print(f'Best Model - Mean Squared Error: {mse}')
+print(f'Best Model - Mean Absolute Error: {mae}')
+
+# Compare ground truth and predictions
+y_test = pd.Series(y_test.values, index=y_test.index, name='Ground Truth')
+y_pred = pd.Series(y_pred, index=y_test.index, name='Prediction')
+results = pd.concat([y_test, y_pred], axis=1)
+print(results)
+
+# Plot predicted vs actual values
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, y_pred, color='blue',
+            alpha=0.5, label='Predicted vs Actual')
+plt.plot([y.min(), y.max()], [y.min(), y.max()],
+         'r--', lw=2, label='Perfect Fit')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.title('Predicted vs Actual Values')
+plt.legend()
+plt.show()
+
+# Predict on all data for further analysis
+y_pred_all = best_model.predict(scaler.transform(X))
+
+# Plot Actual L_value vs Predicted and Analytical L
+plt.figure(figsize=(10, 6))
+plt.scatter(df['L_value'], y_pred_all, color='red',
+            alpha=0.5, label='Predicted L (L_pred)')
+plt.scatter(df['L_value'], df['L_analytic'], color='green',
+            alpha=0.5, label='Analytical L (L_analytic)')
+plt.xlabel('Actual L_value')
+plt.ylabel('L')
+plt.title('Actual L_value vs Predicted and Analytical L')
+plt.legend()
+plt.show()
+
+# Plot L_value, L_analytic, and L_pred against P2
+plt.figure(figsize=(10, 6))
+plt.scatter(df['P2'], df['L_value'], color='blue', alpha=0.5, label='L_value')
+plt.scatter(df['P2'], df['L_analytic'], color='green',
+            alpha=0.5, label='L_analytic')
+plt.scatter(df['P2'], y_pred_all, color='red', alpha=0.5, label='L_pred')
+plt.xlabel('P2')
+plt.ylabel('L')
+plt.title('L_value, L_analytic, and L_pred vs P2')
+plt.legend()
+plt.show()

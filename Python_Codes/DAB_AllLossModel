@@ -1,0 +1,375 @@
+import numpy as np
+from scipy.integrate import trapz
+# Function to calculate Vth based on MATLAB code logic
+
+
+def calculate_vth(i, wt, phi, delta1, delta2, V1, V2):
+    if i == 1:
+        phi_y, delta_y, Vy = 0, delta1, V1
+    else:
+        phi_y, delta_y, Vy = phi, delta2, V2
+
+    if phi_y - delta_y < wt < phi_y + delta_y:
+        v_y = 0
+    elif phi_y + delta_y < wt < np.pi + phi_y - delta_y:
+        v_y = Vy
+    elif np.pi + phi_y - delta_y < wt < np.pi + phi_y + delta_y:
+        v_y = 0
+    elif np.pi + phi_y + delta_y < wt < 2 * np.pi + phi_y - delta_y:
+        v_y = -Vy
+    elif phi_y - (np.pi - delta_y) < wt < phi_y - delta_y:
+        v_y = -Vy
+    else:
+        v_y = 0
+    return v_y
+
+
+def DAB_physics_model_6(Vin, Vout, phi, delta1, delta2, Ron1, Ron2, Ll1, Ll2):
+    V1 = Vin
+    n1 = 7
+    n2 = 5
+    V2 = n1/n2 * Vout
+
+    x = 0.16
+    fsw = 1e5
+
+    Ron1 *= 1e-3
+    Ron2 = (n1/n2)**2 * Ron2 * 1e-3
+    Rl1 = 20e-3
+    Rl2 = (n1/n2)**2 * 15e-3
+    L1 = (Ll1 + x) * 1e-6
+    L2 = ((n1/n2)**2 * (Ll2 + x * ((n2/n1)**2))) * 1e-6
+    Lm = 776.89e-6
+    Rm = 1.0805e+07
+
+    esr_Cb1 = 5e-3
+    esr_Cb2 = (n1/n2)**2 * 5e-3
+
+    w = 2 * np.pi * fsw
+
+    t = np.linspace(0, 10e-6, 100)
+    phase1 = [delta1, -delta1]
+    phase_pk = [delta1, -delta1, phi + delta2, phi - delta2]
+    phase2 = [phi + delta2, phi - delta2]
+
+    Z1 = np.zeros(26, dtype=complex)
+    Z2 = np.zeros(26, dtype=complex)
+    Z3 = np.zeros(26, dtype=complex)
+    Ztot = np.zeros(26, dtype=complex)
+    Z12 = np.zeros(26, dtype=complex)
+    Z23 = np.zeros(26, dtype=complex)
+    Z13 = np.zeros(26, dtype=complex)
+    v1_abs = np.zeros(26)
+    v2_abs = np.zeros(26)
+    Ai1 = np.zeros(26)
+    Bi1 = np.zeros(26)
+    Ai2 = np.zeros(26)
+    Bi2 = np.zeros(26)
+    i1_t = np.zeros((len(t), 26))
+    i2_t = np.zeros((len(t), 26))
+    Vm_t = np.zeros((len(t), 26))
+    v1_t = np.zeros((len(t), 26))
+    v2_t = np.zeros((len(t), 26))
+    i1_phase = np.zeros((len(phase1), 26))
+    i2_phase = np.zeros((len(phase2), 26))
+    i1_pk = np.zeros((len(phase_pk), 26))
+    i2_pk = np.zeros((len(phase_pk), 26))
+
+    sum_i1_RMS_squared = 0
+    sum_i2_RMS_squared = 0
+    sum_Pac_1 = 0
+    sum_Pac_2 = 0
+    i1_abs = np.zeros(26)
+    i2_abs = np.zeros(26)
+    angle_i1 = np.zeros(26)
+    angle_i2 = np.zeros(26)
+    cos_angle = np.zeros(26)
+
+    for k in range(1, 53, 2):
+        k_idx = ((k + 1) // 2)-1
+        Z1[k_idx] = 2 * Ron1 + Rl1 + esr_Cb1 + 1j * (2 * np.pi * fsw * k * L1)
+        Z2[k_idx] = 2 * Ron2 + Rl2 + esr_Cb2 + 1j * (2 * np.pi * fsw * k * L2)
+        Z3[k_idx] = Rm * 1j * (2 * np.pi * fsw * k * Lm) / \
+            (Rm + 1j * (2 * np.pi * fsw * k * Lm))
+        Ztot[k_idx] = Z1[k_idx] * Z2[k_idx] + \
+            Z1[k_idx] * Z3[k_idx] + Z2[k_idx] * Z3[k_idx]
+        Z12[k_idx] = Ztot[k_idx] / Z3[k_idx]
+        Z23[k_idx] = Ztot[k_idx] / Z1[k_idx]
+        Z13[k_idx] = Ztot[k_idx] / Z2[k_idx]
+
+        v1_abs[k_idx] = 4 * V1 * np.cos(k * delta1) / (k * np.pi)
+        v2_abs[k_idx] = 4 * V2 * np.cos(k * delta2) / (k * np.pi)
+
+        Ai1[k_idx] = (v1_abs[k_idx] / abs(Z12[k_idx])) * np.cos(np.angle(Z12[k_idx])) - \
+                     (v2_abs[k_idx] / abs(Z12[k_idx])) * np.cos(k * phi + np.angle(Z12[k_idx])) + \
+                     (v1_abs[k_idx] / abs(Z13[k_idx])) * \
+            np.cos(np.angle(Z13[k_idx]))
+
+        Bi1[k_idx] = -(v1_abs[k_idx] / abs(Z12[k_idx])) * np.sin(np.angle(Z12[k_idx])) + \
+            (v2_abs[k_idx] / abs(Z12[k_idx])) * np.sin(k * phi + np.angle(Z12[k_idx])) - \
+            (v1_abs[k_idx] / abs(Z13[k_idx])) * np.sin(np.angle(Z13[k_idx]))
+
+        Ai2[k_idx] = -(v1_abs[k_idx] / abs(Z12[k_idx])) * np.cos(np.angle(Z12[k_idx])) + \
+            (v2_abs[k_idx] / abs(Z12[k_idx])) * np.cos(k * phi + np.angle(Z12[k_idx])) + \
+            (v2_abs[k_idx] / abs(Z23[k_idx])) * \
+            np.cos(k * phi + np.angle(Z23[k_idx]))
+
+        Bi2[k_idx] = (v1_abs[k_idx] / abs(Z12[k_idx])) * np.sin(np.angle(Z12[k_idx])) - \
+                     (v2_abs[k_idx] / abs(Z12[k_idx])) * np.sin(k * phi + np.angle(Z12[k_idx])) - \
+                     (v2_abs[k_idx] / abs(Z23[k_idx])) * \
+            np.sin(k * phi + np.angle(Z23[k_idx]))
+
+        i1_t[:, k_idx] = Ai1[k_idx] * \
+            np.sin(k * w * t) + Bi1[k_idx] * np.cos(k * w * t)
+        i2_t[:, k_idx] = Ai2[k_idx] * \
+            np.sin(k * w * t) + Bi2[k_idx] * np.cos(k * w * t)
+
+        Vm_t[:, k_idx] = 2 * np.pi * fsw * k * Lm * ((Ai1[k_idx] + Ai2[k_idx]) * np.cos(
+            k * w * t) - (Bi1[k_idx] + Bi2[k_idx]) * np.sin(k * w * t))
+
+        i1_phase[:, k_idx] = Ai1[k_idx] * \
+            np.sin(k * np.array(phase1)) + \
+            Bi1[k_idx] * np.cos(k * np.array(phase1))
+        i2_phase[:, k_idx] = Ai2[k_idx] * \
+            np.sin(k * np.array(phase2)) + \
+            Bi2[k_idx] * np.cos(k * np.array(phase2))
+
+        i1_pk[:, k_idx] = Ai1[k_idx] * \
+            np.sin(k * np.array(phase_pk)) + \
+            Bi1[k_idx] * np.cos(k * np.array(phase_pk))
+        i2_pk[:, k_idx] = Ai2[k_idx] * \
+            np.sin(k * np.array(phase_pk)) + \
+            Bi2[k_idx] * np.cos(k * np.array(phase_pk))
+
+        v1_t[:, k_idx] = v1_abs[k_idx] * np.sin(k * w * t)
+        v2_t[:, k_idx] = v2_abs[k_idx] * np.sin(k * (w * t - phi))
+
+        i1_abs[k_idx] = np.sqrt(Ai1[k_idx]**2 + Bi1[k_idx]**2)
+        i2_abs[k_idx] = np.sqrt(Ai2[k_idx]**2 + Bi2[k_idx]**2)
+        angle_i1[k_idx] = np.arctan2(Bi1[k_idx], Ai1[k_idx])
+        angle_i2[k_idx] = (k*phi) + np.arctan2(Bi2[k_idx], Ai2[k_idx])
+        cos_angle[k_idx] = np.cos(angle_i1[k_idx])
+        sum_Pac_1 = sum_Pac_1 + (v1_abs[k_idx] / np.sqrt(2)) * np.sqrt(
+            (Ai1[k_idx] ** 2 + Bi1[k_idx] ** 2) / 2) * np.cos(angle_i1[k_idx])
+
+        sum_i1_RMS_squared = sum_i1_RMS_squared + \
+            (Ai1[k_idx] ** 2 + Bi1[k_idx] ** 2)
+        sum_i2_RMS_squared = sum_i2_RMS_squared + \
+            (Ai2[k_idx] ** 2 + Bi2[k_idx] ** 2)
+
+        sum_Pac_2 = sum_Pac_2 + (v2_abs[k_idx] / np.sqrt(2)) * \
+            (np.sqrt((Ai2[k_idx] ** 2 + Bi2[k_idx] ** 2) / 2)) * \
+            np.cos(angle_i2[k_idx])
+    # sum_i1_RMS_squared += i1_abs[k_idx]**2
+    # sum_i2_RMS_squared += i2_abs[k_idx]**2
+    # sum_Pac_1 += 0.5 * i1_abs[k_idx] * v1_abs[k_idx] * cos_angle[k_idx]
+    # sum_Pac_2 += 0.5 * i2_abs[k_idx] * v2_abs[k_idx] * cos_angle[k_idx]
+
+    I1_RMS = np.sqrt(sum_i1_RMS_squared/2)
+    I2_RMS = np.sqrt(sum_i2_RMS_squared/2)*(7/5)
+    Pac_1 = sum_Pac_1
+    Pac_2 = sum_Pac_2
+    print(f"{Pac_1}, {Pac_2}")
+    # Calculate Vm_total_t
+    Vm_total_t = np.sum(Vm_t, axis=1)
+
+    positive_Vm = Vm_total_t.copy()
+
+    positive_Vm[positive_Vm < 0] = 0  # Set negative values to 0
+    volt_sec = trapz(positive_Vm, t)
+
+    # Calculate i1_sw_curr and i2_sw_curr (sum of currents)
+    i1_sw_curr = np.sum(i1_phase, axis=1)
+    i2_sw_curr = np.sum(i2_phase, axis=1)
+    print(i1_sw_curr)
+    sw_on_curr_array = [i1_sw_curr, i2_sw_curr]
+    i1_sw_pk_curr = np.sum(i1_pk)
+    i2_sw_pk_curr = np.sum(i2_pk)
+    # Calculate i1_max and i2_max
+    i1_max = np.max(np.abs(i1_sw_pk_curr))
+    i2_max = (7/5) * np.max(np.abs(i2_sw_pk_curr))
+
+    # Initialize arrays and values (replace with actual values)
+    delta = [delta1, delta2]
+    V = [V1, V2]
+    N = [7, 5]
+    L = L1 + L2
+    Rds_on = [17*1e-3, 5*1e-3]
+    Coss = [1200*1e-12, 1200*1e-12]
+    Rg_on = [10, 10]
+    Rg_off = [5, 5]
+    Cin = [1e-12*1200, 1e-12*2000]
+    Vdr = [6, 5]
+    Vpl = [3, 2.3]
+    Vth = [1.7, 1.1]
+    Cgd = [1e-12*14, 1e-12*10]
+    Qoss = [240*1e-9, 250*1e-9]
+    Qg = [30*1e-9, 36*1e-9]
+    N_tot = 2
+    SW_ON_mat_redefined = np.zeros((2, N_tot))
+    zvs = np.zeros((2, N_tot))
+    Vth_mat_redefind = np.array([
+        [calculate_vth(2, delta1, phi, delta1, delta2, V1, V2), calculate_vth(
+            1, phi + delta2, phi, delta1, delta2, V1, V2)],
+        [calculate_vth(2, np.pi - delta1, phi, delta1, delta2, V1, V2),
+         calculate_vth(1, phi + np.pi - delta2, phi, delta1, delta2, V1, V2)]
+    ])
+    for i in range(2):
+        SW_ON_mat_redefined[:, i] = (sw_on_curr_array[i][0],
+
+                                     sw_on_curr_array[i][1])
+    print(SW_ON_mat_redefined)
+    # Example function calculate_vth
+
+    # Replace with actual calculation based on MATLAB function
+
+    # Calculate zvs
+    for i in range(2):
+        for k in range(2):
+            if delta[i] < 0.01:
+                if SW_ON_mat_redefined[0, i] < 0:
+                    ind_energy = 0.5 * L * (SW_ON_mat_redefined[0, i])**2
+                    cap_energy = -2 * \
+                        Coss[i] * ((N[i] / N[0])**2) * \
+                        Vth_mat_redefind[0][i] * V[i]
+                    if ind_energy >= cap_energy:
+                        zvs[0, i] = 1
+                        zvs[1, i] = 1
+                    else:
+                        zvs[0, i] = 1 - \
+                            np.sqrt((cap_energy - ind_energy) / cap_energy)
+                        zvs[1, i] = zvs[0, i]
+                else:
+                    zvs[0, i] = 0
+                    zvs[1, i] = 0
+            else:
+                if SW_ON_mat_redefined[k, i] < 0:
+                    ind_energy = 0.5 * L * (SW_ON_mat_redefined[k, i])**2
+                    cap_energy = -2 * Coss[i] * ((N[i] / N[0])**2) * Vth_mat_redefind[k, i] * V[i] + \
+                        (-1)**(k + 1) * Coss[i] * \
+                        ((N[i] / N[0])**2) * (V[i])**2
+                    if ind_energy >= cap_energy:
+                        zvs[k, i] = 1
+                    else:
+                        zvs[k, i] = 1 - \
+                            np.sqrt((cap_energy - ind_energy) / cap_energy)
+                else:
+                    zvs[k, i] = 0
+
+    # Initialize arrays and values (replace with actual values)
+    N_tot = 2
+    sw_loss = np.zeros((2, N_tot))
+    Coss_loss_dist = np.zeros(N_tot)
+    gate_drive_loss_dist = np.zeros(N_tot)
+    t1 = np.zeros(2)
+    t2 = np.zeros(2)
+    t3 = np.zeros(2)
+    t4 = np.zeros(2)
+    # Calculate losses
+    for i in range(N_tot):
+        Coss_loss_dist[i] = 4 * 0.5 * Qoss[i] * V[i] * N[i] / N[0] * fsw
+        gate_drive_loss_dist[i] = 4 * Qg[i] * Vdr[i] * fsw
+        t3[i] = Cgd[i] * (1 + Rg_off[i]) * V[i] * N[i] / N[0] / Vpl[i]
+        t4[i] = (1 + Rg_off[i]) * Cin[i] * np.log(Vpl[i] / Vth[i])
+        t1[i] = (1 + Rg_on[i]) * Cin[i] * \
+            np.log((Vdr[i] - Vth[i]) / (Vdr[i] - Vpl[i]))
+        t2[i] = (1 + Rg_on[i]) * Cgd[i] * V[i] * \
+            N[i] / N[0] / (Vdr[i] - Vpl[i])
+        for k in range(2):
+            sw_loss[k, i] = 2 * V[i] * N[i] / N[0] * \
+                np.abs(SW_ON_mat_redefined[k, i]) * fsw * (t3[i] + t4[i])
+            sw_loss[k, i] += (1 - zvs[k, i]) * (2 * V[i] * N[i] / N[0] * np.abs(SW_ON_mat_redefined[k, i]) * fsw * (t1[i] + t2[i]) +
+                                                2 * Qoss[i] * V[i] * N[i] / N[0] * fsw)
+
+    # Calculate total switch loss distribution
+    sw_loss_dist = np.sum(sw_loss, axis=1)
+    print(sw_loss_dist)
+
+    # Example values for magnetic losses calculation
+    Ae_1 = 2 * 135 * 1e-6  # m^2
+    L_value_1 = L1 - x * 1e-6  # H
+    N_turns_1 = 4
+    Bm_1 = (i1_max * L_value_1) / (N_turns_1 * Ae_1)  # in T
+    Ve_1 = 5750 * 2  # in mm^3
+
+    Ae_2 = 135 * 1e-6  # m^2
+    L_value_2 = (n2 / n1)**2 * (L2 - x * 1e-6)  # H
+    N_turns_2 = 4
+    Bm_2 = (i2_max * L_value_2) / (N_turns_2 * Ae_2)  # in T
+    Ve_2 = 5750  # in mm^3
+
+    # Example coefficients for material R
+    a = 2.67
+    b = -3.42e-2
+    c = 1.75e-4
+    d = 0
+    e = 0
+
+    # Example input temperature T
+    T = 40  # in degrees Celsius
+
+    # Calculate Tc
+    Tc = a + b * T + c * T**2 + d * T**3 + e * T**4
+
+    # Coefficients for material R at different frequency ranges
+    coeffs = np.array([
+        [0.074, 1.43, 2.85],   # f < 100 kHz
+        [0.036, 1.7, 2.68],    # 100 kHz <= f < 500 kHz
+        [0.014, 1.84, 2.2]     # f >= 500 kHz
+    ])
+
+    # Input parameters for magnetic losses calculation
+    f = 100  # in kHz
+    B_1 = 10 * Bm_1  # in kG
+    B_2 = 10 * Bm_2  # in kG
+
+    # Determine coefficients based on frequency
+    if f < 100:
+        a, c, d = coeffs[0]
+    elif 100 <= f < 500:
+        a, c, d = coeffs[1]
+    else:
+        a, c, d = coeffs[2]
+
+    # Calculate magnetic core losses
+    Pcore_L1 = a * (f**c) * (B_1**d) * 1e-6 * Ve_1 * Tc
+    Pcore_L2 = a * (f**c) * (B_2**d) * 1e-6 * Ve_2 * Tc
+
+    # Example values for leakage inductance losses calculation
+    Np = 7
+    Ae_lm = 2 * 194 * 1e-6  # in m^2
+    B_lm = volt_sec / (2 * Np * Ae_lm)  # in T
+    Ve_lm = 2 * 10200  # in mm^3
+    Pcore_Lm = a * (f**c) * ((B_lm * 10)**d) * 1e-6 * Ve_lm * Tc
+
+    P_Cond = [I1_RMS**2 * (2 * Ron1 + Rl1 + esr_Cb1),
+              (5/7 * I2_RMS)**2 * (2 * Ron2 + Rl2 + esr_Cb2)]
+
+    # Calculate total losses
+    P_loss_total = np.sum(P_Cond) + np.sum(sw_loss_dist) + \
+        Pcore_L1 + Pcore_L2 + Pcore_Lm
+
+    # Calculate input and output powers
+    Pdc_in = Pac_1 + sw_loss_dist[0]
+    Pdc_out = -Pac_2 - sw_loss_dist[1] - Pcore_L2 - Pcore_L1 - Pcore_Lm
+
+    # Resultant array y containing results
+    # Calculate the positive area under the Vm curve (volt-second)
+    y = np.array([Pdc_in, Pdc_out, Pdc_in - Pdc_out, P_loss_total])
+    return Pdc_in, Pdc_out, Pdc_in - Pdc_out, P_loss_total
+
+
+Vin = 160
+Vout = 120
+phi = 0.5
+delta1 = 0.1
+delta2 = 0.1
+Ron1 = 15
+Ron2 = 4
+Ll1 = 5.96
+Ll2 = 2.85
+
+Pdc_in, Pdc_out, l1, P_loss_total = DAB_physics_model_6(
+    Vin, Vout, phi, delta1, delta2, Ron1, Ron2, Ll1, Ll2)
+print(
+    f"Pdc_in: {Pdc_in}, Pdc_out: {Pdc_out}, Loss: {l1}, P_loss_total: {P_loss_total}")
